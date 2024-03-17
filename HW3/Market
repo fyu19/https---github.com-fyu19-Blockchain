@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: MIT
+
+
+pragma solidity ^0.8.20;
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+//Each time I manually approve each operation
+contract market{
+    address immutable token0;
+    address immutable token1;
+    uint256 immutable conversionRate;
+    //Total amount of token0 and token1 in the contract
+    uint256 public token0Amount;
+    uint256 public token1Amount;
+    //Mapping used in order to record how many the contract owns to those who invested in
+    mapping(address => uint256) public liquidityToken0Provided;
+    mapping(address => uint256) public liquidityToken1Provided;
+
+    //Constructor called at the creation of the market, token1, token2 and conversionRate cannot be changed after : immutable
+    constructor(address tok0, address tok1, uint256 convRate){
+        token0 = tok0;
+        token1 = tok1;
+        conversionRate = convRate;
+        token0Amount = 0;
+        token1Amount = 0;       
+    }
+
+
+    //Function to trade fromAmount of tokenFrom to the other token
+    function trade(address tokenFrom, uint256 fromAmount) external  {
+        //Ensure that is is either token 0 or 1
+        require(tokenFrom == token0 || tokenFrom == token1, "Incorrect token");
+        //Cash the tokens
+        IERC20(tokenFrom).transferFrom(msg.sender,address(this),fromAmount);
+        if (tokenFrom == token0){
+            if (fromAmount*conversionRate/10000 <= token1Amount){
+                //If the traded token is 0 to token 1 and we have enough token 1 to ensure the trade :
+                //We update the quantities and trade the amount of token 1 according to the conversion Rate
+                token0Amount += fromAmount;
+                IERC20(token1).transfer(msg.sender,fromAmount*conversionRate/10000);
+                token1Amount -= fromAmount*conversionRate/10000;                
+            }
+            else {
+                //We don't have enough token 1 to ensure the entirety of the trade, we revert his tokens back
+                revert("We don't have enough liquidity for this trade, sorry");
+            }
+        }
+        else{
+            if (fromAmount*10000/conversionRate <= token0Amount){
+                //If the traded token is 1 to token 0 and we have enough token 0 to ensure the trade :
+                //We update the quantities and trade the amount of token 0 according to the conversion Rate
+                token1Amount += fromAmount;
+                IERC20(token0).transfer(msg.sender,fromAmount*10000/conversionRate);
+                token0Amount -= fromAmount*10000/conversionRate;
+            }
+            else {
+                //We don't have enough token 0 to ensure the entirety of the trade, we revert his tokens back
+                revert("We don't have enough liquidity for this trade, sorry");
+            }            
+        }
+    }
+
+    //Function to provide liquidity in the market
+    function provideLiquidity(uint256 tok0Amount, uint256 tok1Amount) external {
+        //If there is nothing in the market, we cash in everything
+        if (token0Amount == 0 && token1Amount == 0){
+            //Cash in
+            IERC20(token0).transferFrom(msg.sender,address(this),tok0Amount);
+            IERC20(token1).transferFrom(msg.sender,address(this),tok1Amount);
+            //Update the total amount
+            token0Amount = tok0Amount;
+            token1Amount = tok1Amount;
+            //Update what the sender has provided
+            liquidityToken0Provided[msg.sender] += tok0Amount;
+            liquidityToken1Provided[msg.sender] += tok1Amount;
+        }
+        else if (token0Amount == 0 && tok1Amount > 0){
+            //In case we want to provide token 1 and there is no token0, we can take everything as well
+            IERC20(token1).transferFrom(msg.sender,address(this),tok1Amount);
+            token1Amount += tok1Amount;
+            liquidityToken1Provided[msg.sender] += tok1Amount;
+        }
+        else if (token1Amount == 0 && tok0Amount > 0){
+            //Same case but with the other token
+            IERC20(token0).transferFrom(msg.sender,address(this),tok0Amount);
+            token0Amount += tok0Amount;
+            liquidityToken0Provided[msg.sender] += tok0Amount;
+        }
+        else{
+            //Case where we provide both token0 and 1, we need to do so according to the current ratio of the contract
+            require(tok0Amount>0 && tok1Amount > 0);
+            //Amount that we need to cash in if we cash in everything while respecting the ration
+            // with the ratio constrain one but only one  may exceed what the user provides 
+            uint256 requiredAmount0 = token0Amount * tok1Amount / token1Amount;
+            uint256 requiredAmount1 = token1Amount * tok0Amount / token0Amount;
+            //The actual amount that we are going to cash in
+            uint256 amountToken0ToConsume = tok0Amount;
+            uint256 amountToken1ToConsume = tok1Amount;
+            //If the ratio allows it, we cash in the maximum amount of token0 possible with the constrain
+            //Otherwise the limit is set to the amount provided and it will respect the ratio as the other value is calculated accordingly
+            if (requiredAmount0 <= tok0Amount){
+                amountToken0ToConsume = requiredAmount0;
+            }
+            // The case for the other token
+            if (requiredAmount1 <= tok1Amount){
+                amountToken1ToConsume = requiredAmount1;
+            }
+            //Cash in and update everything
+            IERC20(token0).transferFrom(msg.sender,address(this),amountToken0ToConsume);
+            IERC20(token1).transferFrom(msg.sender,address(this),amountToken1ToConsume);
+            token0Amount += amountToken0ToConsume;
+            token1Amount += amountToken1ToConsume;
+            liquidityToken0Provided[msg.sender] += amountToken0ToConsume;
+            liquidityToken1Provided[msg.sender] += amountToken1ToConsume;
+        }
+        }
+
+    //Function to withdraw liquidy
+    //As it is a market place, it should be depending on the share and then % he ownws
+    //However as no conversionRate nor values fluctuate here, the share someone owns is equal to the value of the token he provided
+    //The value is calculated on token1 unit, with the conversionRate set initially.
+    function withdrawLiquidity() external{
+        require(token1Amount + token0Amount*conversionRate/10000 >= liquidityToken1Provided[msg.sender] + liquidityToken0Provided[msg.sender]*conversionRate/10000, "Not enough liquidity for the entire withdrawal");
+        //Calculate the total value of what he provided
+        uint256 token0valueToWithdraw = liquidityToken1Provided[msg.sender];
+        uint256 token1valueToWithdraw = liquidityToken0Provided[msg.sender]*conversionRate/10000;
+        uint256 valueToWithdraw = token1valueToWithdraw + token0valueToWithdraw;
+        if (token0Amount == 0){
+            //If token0 amount is null, we cash out the correct value in token1 
+            IERC20(token1).transfer(msg.sender,valueToWithdraw);
+            token1Amount -= valueToWithdraw;
+        }
+        else if (token1Amount == 0){
+            //If token1 amount is null, we cash out the correct value in token0
+            IERC20(token0).transfer(msg.sender,valueToWithdraw*10000/conversionRate);
+            token0Amount -= valueToWithdraw*10000/conversionRate;
+        }
+        else {
+            //Now we have to cashout in a way that the ratio in the market place dosn't change. 
+            //We have valueToWithdraw = token1valueToWithdraw + token0valueToWithdraw
+            // and expectedTok0ToCashOut/expectedTok0ToCashOut=token0Amount/token1Amount
+            //By combining the two formula, we get expectedTok0ToCashOut and expectedTok0ToCashOut
+            //By derivating it, we can be sure that it won't exceed token0Amount and token1AMount
+            //Btw we have to ensure that there is a less float between 0 and 1 as possible as it will be rounded to 0
+            uint256 expectedTok0ToCashOut = token0Amount*valueToWithdraw / (token0Amount*conversionRate/10000+ token1Amount );
+            uint256 expectedTok1ToCashOut = valueToWithdraw - conversionRate*expectedTok0ToCashOut/10000;
+            IERC20(token0).transfer(msg.sender,expectedTok0ToCashOut);
+            IERC20(token1).transfer(msg.sender,expectedTok1ToCashOut);
+            token0Amount -= expectedTok0ToCashOut;
+            token1Amount -= expectedTok1ToCashOut;
+            liquidityToken0Provided[msg.sender] = 0;
+            liquidityToken1Provided[msg.sender] = 0;           
+        }
+    }
+}
